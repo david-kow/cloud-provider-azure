@@ -160,7 +160,7 @@ build-node-image-linux: buildx-setup ## Build node-manager image.
 .PHONY: build-node-image-windows
 build-node-image-windows: buildx-setup $(BIN_DIR)/azure-cloud-node-manager.exe ## Build node-manager image for Windows.
 	$(DOCKER_BUILDX) build --pull \
-		--output=type=$(OUTPUT_TYPE) \
+		--output=type=registry \
 		--platform windows/$(ARCH) \
 		-t $(NODE_MANAGER_WINDOWS_FULL_IMAGE_PREFIX)-$(WINDOWS_OSVERSION)-$(ARCH) \
 		--build-arg OSVERSION=$(WINDOWS_OSVERSION) \

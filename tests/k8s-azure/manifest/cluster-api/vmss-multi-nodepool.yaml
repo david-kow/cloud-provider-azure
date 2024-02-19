@@ -35,12 +35,21 @@ spec:
     subnets:
       - name: control-plane-subnet
         role: control-plane
+        cidrBlocks:
+          - 172.17.1.0/24
       - name: node-subnet
+        role: node
+        cidrBlocks:
+          - 172.17.2.0/24
         natGateway:
           name: node-natgateway
-        role: node
     vnet:
-      name: ${CLUSTER_NAME}-vnet
+      name: ${AZURE_VNET}
+      cidrBlocks:
+        - 172.17.0.0/16
+      peerings:
+      - resourceGroup: shudhar-slb-test-RG
+        remoteVnetName: VNet
   resourceGroup: ${AZURE_RESOURCE_GROUP}
   subscriptionID: ${AZURE_SUBSCRIPTION_ID}
 ---

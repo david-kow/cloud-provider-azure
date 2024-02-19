@@ -17,12 +17,12 @@
 set -o errexit
 set -o pipefail
 
-REPO_ROOT=$(dirname "${BASH_SOURCE[0]}")/..
+REPO_ROOT=$PWD
 WORKLOAD_CLUSTER_TEMPLATE_DIR="${REPO_ROOT}/tests/k8s-azure/manifest/cluster-api"
 MANAGEMENT_CLUSTER_NAME="${MANAGEMENT_CLUSTER_NAME:-capz}"
 WORKLOAD_CLUSTER_TEMPLATE="${WORKLOAD_CLUSTER_TEMPLATE:-${WORKLOAD_CLUSTER_TEMPLATE_DIR}/vmss-multi-nodepool.yaml}"
 
-GENERATED_KUBECONFIG_DIRECTORY="${REPO_ROOT}/.kubeconfig"
+GENERATED_KUBECONFIG_DIRECTORY="${REPO_ROOT}"
 
 : "${AZURE_SUBSCRIPTION_ID:?empty or not defined.}"
 : "${AZURE_TENANT_ID:?empty or not defined.}"
@@ -131,15 +131,15 @@ function create_workload_cluster() {
   fi
 
   echo "Waiting for the kubeconfig to become available"
-  timeout --foreground 1000 bash -c "while ! kubectl get secrets -n "${CLUSTER_NAME}" | grep ${CLUSTER_NAME}-kubeconfig; do sleep 1; done"
+  timeout --foreground 5000 bash -c "while ! kubectl get secrets -n "${CLUSTER_NAME}" | grep ${CLUSTER_NAME}-kubeconfig; do sleep 1; done"
   if [ "$?" == 124 ]; then
     echo "Timeout waiting for the kubeconfig to become available, please check the logs of the capz controller to get the detailed error"
     return 124
   fi
   echo "Get kubeconfig and store it locally."
-  kubectl --context="${MGMT_CLUSTER_CONTEXT}" get secrets "${CLUSTER_NAME}"-kubeconfig -o json -n "${CLUSTER_NAME}" | jq -r .data.value | base64 --decode > ./"${CLUSTER_NAME}"-kubeconfig
+  kubectl --context="${MGMT_CLUSTER_CONTEXT}" get secrets "${CLUSTER_NAME}"-kubeconfig -o json -n "${CLUSTER_NAME}" | jq -r .data.value | base64 --decode > ${GENERATED_KUBECONFIG_DIRECTORY}/"${CLUSTER_NAME}"-kubeconfig
   echo "Waiting for the control plane nodes to show up"
-  timeout --foreground 1000 bash -c "while ! kubectl --kubeconfig="${GENERATED_KUBECONFIG_DIRECTORY}"/${CLUSTER_NAME}-kubeconfig get nodes -n "${CLUSTER_NAME}" | grep -E 'master|control-plane'; do sleep 1; done"
+  timeout --foreground 5000 bash -c "while ! kubectl --kubeconfig="${GENERATED_KUBECONFIG_DIRECTORY}"/${CLUSTER_NAME}-kubeconfig get nodes -n "${CLUSTER_NAME}" | grep -E 'master|control-plane'; do sleep 1; done"
   if [ "$?" == 124 ]; then
     echo "Timeout waiting for the control plane nodes"
     return 124
@@ -156,8 +156,11 @@ function create_workload_cluster() {
     --set-string cloudControllerManager.imageRepository="${AZURE_CLOUD_CONTROLLER_MANAGER_IMG_REGISTRY}" \
     --set-string cloudControllerManager.imageName="${AZURE_CLOUD_CONTROLLER_MANAGER_IMG_NAME}" \
     --set-string cloudControllerManager.imageTag="${AZURE_CLOUD_CONTROLLER_MANAGER_IMG_TAG}" \
+    --set-string cloudNodeManager.imageRepository="${AZURE_CLOUD_NODE_MANAGER_IMG_REGISTRY}" \
+    --set-string cloudNodeManager.imageName="${AZURE_CLOUD_NODE_MANAGER_IMG_NAME}" \
     --set-string cloudNodeManager.imageTag="${AZURE_CLOUD_NODE_MANAGER_IMG_TAG}" \
-    --set cloudNodeManager.enableHealthProbeProxy=true
+    --set cloudNodeManager.enableHealthProbeProxy=true \
+    --set-string WINDOWS_VM_CA="${WINDOWS_VM_CA}"
 
   echo "Run \"kubectl --kubeconfig=.${GENERATED_KUBECONFIG_DIRECTORY}/${CLUSTER_NAME}-kubeconfig ...\" to work with the new target cluster, It may cost up to several minutes until all agent nodes show up. After that, do not forget to install a network plugin to make all nodes Ready."
 }

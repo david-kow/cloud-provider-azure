@@ -17,21 +17,31 @@ limitations under the License.
 package options
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"net"
+	"net/http"
+	"os"
+	"strings"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	apiserveroptions "k8s.io/apiserver/pkg/server/options"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/informers"
 	clientset "k8s.io/client-go/kubernetes"
 	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 	restclient "k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/record"
 	cloudprovider "k8s.io/cloud-provider"
@@ -50,6 +60,8 @@ import (
 
 	// add the kubernetes feature gates
 	_ "k8s.io/controller-manager/pkg/features/register"
+
+	v3 "github.com/projectcalico/api/pkg/apis/projectcalico/v3"
 )
 
 const (
@@ -206,6 +218,16 @@ func (o *CloudControllerManagerOptions) ApplyTo(
 		return err
 	}
 
+	dynamicClient, err := dynamic.NewForConfig(c.Kubeconfig)
+
+	if err != nil {
+		return err
+	}
+
+	klog.Error(err)
+
+	c.DynamicInformers = dynamicinformer.NewDynamicSharedInformerFactory(dynamicClient, ResyncPeriod(c)())
+
 	c.EventRecorder = createRecorder(c.Client, userAgent)
 
 	rootClientBuilder := clientbuilder.SimpleControllerClientBuilder{
@@ -226,9 +248,136 @@ func (o *CloudControllerManagerOptions) ApplyTo(
 	// sync back to component config
 	// TODO: find more elegant way than syncing back the values.
 
+	setUpBlockAffinitiesInformer(c.DynamicInformers, c.SharedInformers)
+
 	c.ComponentConfig.NodeStatusUpdateFrequency = o.NodeStatusUpdateFrequency
 
 	return nil
+}
+
+type NodePodCIDR struct {
+	NodeIP  string `json:"nodeIP"`
+	PodCIDR string `json:"podCIDR"`
+	Action  string `json:"action"`
+}
+
+func getNodePrivateIPAddresses(node *v1.Node) []string {
+	addresses := make([]string, 0)
+	for _, nodeAddress := range node.Status.Addresses {
+		if strings.EqualFold(string(nodeAddress.Type), string(v1.NodeInternalIP)) {
+			addresses = append(addresses, nodeAddress.Address)
+		}
+	}
+
+	return addresses
+}
+
+func setUpBlockAffinitiesInformer(dynamicInformerFactory dynamicinformer.DynamicSharedInformerFactory, informerFactory informers.SharedInformerFactory) {
+
+	klog.Info("Setting up Block Affinities Informer")
+
+	resource := schema.GroupVersionResource{Group: "crd.projectcalico.org", Version: "v1", Resource: "blockaffinities"}
+	informer := dynamicInformerFactory.ForResource(resource).Informer()
+
+	nodeLister := informerFactory.Core().V1().Nodes().Lister()
+
+	informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			typedObj := obj.(*unstructured.Unstructured)
+
+			bytes, _ := typedObj.MarshalJSON()
+
+			var blockAffinity *v3.BlockAffinity
+			json.Unmarshal(bytes, &blockAffinity)
+
+			podCIDR := blockAffinity.Spec.CIDR
+			nodeName := blockAffinity.Spec.Node
+
+			node, err := nodeLister.Get(nodeName)
+
+			if err != nil {
+				klog.Warning(err)
+			} else {
+				putUdr(node, podCIDR, "add")
+			}
+
+			klog.Infof("BlockAffinity added: %v", blockAffinity)
+		},
+		UpdateFunc: func(oldObj, newObj interface{}) {
+
+			typedObj := newObj.(*unstructured.Unstructured)
+			bytes, _ := typedObj.MarshalJSON()
+
+			var blockAffinity *v3.BlockAffinity
+			json.Unmarshal(bytes, &blockAffinity)
+
+			podCIDR := blockAffinity.Spec.CIDR
+			nodeName := blockAffinity.Spec.Node
+
+			node, err := nodeLister.Get(nodeName)
+
+			if err != nil {
+				klog.Warning(err)
+			} else {
+				putUdr(node, podCIDR, "update")
+			}
+
+			klog.Infof("BlockAffinity updated: %v", blockAffinity.Spec.CIDR)
+		},
+		DeleteFunc: func(obj interface{}) {
+
+			typedObj := obj.(*unstructured.Unstructured)
+			bytes, _ := typedObj.MarshalJSON()
+
+			var blockAffinity *v3.BlockAffinity
+			json.Unmarshal(bytes, &blockAffinity)
+
+			podCIDR := blockAffinity.Spec.CIDR
+			nodeName := blockAffinity.Spec.Node
+
+			node, err := nodeLister.Get(nodeName)
+
+			if err != nil {
+				klog.Warning(err)
+			} else {
+				putUdr(node, podCIDR, "delete")
+			}
+
+			klog.Infof("BlockAffinity deleted: %v", blockAffinity)
+		},
+	})
+
+}
+
+func putUdr(node *v1.Node, podCIDR, action string) {
+	nodeIPs := getNodePrivateIPAddresses(node)
+	vmCA := os.Getenv("WINDOWS_VM_CA")
+	API_PATH := vmCA + "/PutUdr"
+	var nodeIP string
+
+	if len(nodeIPs) > 0 {
+		nodeIP = nodeIPs[0]
+	}
+
+	if nodeIP != "" && podCIDR != "" {
+
+		reqObj := NodePodCIDR{nodeIP, podCIDR, action}
+		jsonReq, err := json.Marshal(reqObj)
+
+		klog.Infof("Sending putUdr request to %s with body %v", API_PATH, reqObj)
+
+		req, err := http.NewRequest(http.MethodPut, API_PATH, bytes.NewBuffer(jsonReq))
+		if err != nil {
+			klog.Warning(err)
+		}
+		req.Header.Set("Content-Type", "application/json; charset=utf-8")
+		client := &http.Client{}
+		_, err = client.Do(req)
+		if err != nil {
+			klog.Warning(err)
+		}
+	}
+
 }
 
 // Validate is used to validate config before launching the cloud controller manager

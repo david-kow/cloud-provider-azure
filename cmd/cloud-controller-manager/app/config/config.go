@@ -18,6 +18,7 @@ package app
 
 import (
 	apiserver "k8s.io/apiserver/pkg/server"
+	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/informers"
 	clientset "k8s.io/client-go/kubernetes"
 	restclient "k8s.io/client-go/rest"
@@ -60,6 +61,8 @@ type Config struct {
 	SharedInformers informers.SharedInformerFactory
 
 	DynamicReloadingConfig DynamicReloadingConfig
+
+	DynamicInformers dynamicinformer.DynamicSharedInformerFactory
 }
 
 type DynamicReloadingConfig struct {
