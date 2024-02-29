@@ -163,6 +163,8 @@ function create_workload_cluster() {
     --set-string WINDOWS_VM_CA="${WINDOWS_VM_CA}"
 
   echo "Run \"kubectl --kubeconfig=.${GENERATED_KUBECONFIG_DIRECTORY}/${CLUSTER_NAME}-kubeconfig ...\" to work with the new target cluster, It may cost up to several minutes until all agent nodes show up. After that, do not forget to install a network plugin to make all nodes Ready."
+
+  kubectl --kubeconfig="${GENERATED_KUBECONFIG_DIRECTORY}"/${CLUSTER_NAME}-kubeconfig apply -f https://raw.githubusercontent.com/kubernetes-sigs/cluster-api-provider-azure/main/templates/addons/calico.yaml
 }
 
 create_management_cluster
