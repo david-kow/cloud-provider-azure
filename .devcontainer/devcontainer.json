@@ -1,7 +1,7 @@
 // For format details, see https://aka.ms/devcontainer.json. For config options, see the
 // README at: https://github.com/devcontainers/templates/tree/main/src/docker-in-docker
 {
-	"name": "CPA",
+	"name": "cloud-provider-azure",
 	// Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
 	"build": {		
         "context": "..",
@@ -22,8 +22,17 @@
 	// Use 'postCreateCommand' to run commands after the container is created.
 	"runArgs": ["--env-file",".devcontainer/.env"],
 
+	"initializeCommand": "test -f '.devcontainer/.env' && echo 'INFO: .env file found, opening devcontainer' || { echo 'ERROR: .env file does not exist, Duplicate .env.example to .env and add required values'; exit 1; }",
+
 	// Configure tool-specific properties.
-	// "customizations": {},
+	"customizations": {
+		"vscode": {			
+			// Add the IDs of extensions you want installed when the container is created.
+			"extensions": [
+				"golang.Go"
+			]
+		}
+	},
 
 	// Uncomment to connect as root instead. More info: https://aka.ms/dev-containers-non-root.
 	"remoteUser": "root"

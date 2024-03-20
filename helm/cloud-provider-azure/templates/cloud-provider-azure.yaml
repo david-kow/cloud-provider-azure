@@ -48,6 +48,12 @@ rules:
     verbs:
       - "*"
   - apiGroups:
+      - ""
+    resources:
+      - nodes/status
+    verbs:
+      - patch      
+  - apiGroups:
       - "crd.projectcalico.org"
     resources:
       - blockaffinities

@@ -145,6 +145,8 @@ function create_workload_cluster() {
     return 124
   fi
 
+  kubectl --kubeconfig="${GENERATED_KUBECONFIG_DIRECTORY}"/${CLUSTER_NAME}-kubeconfig apply -f https://raw.githubusercontent.com/kubernetes-sigs/cluster-api-provider-azure/main/templates/addons/calico.yaml
+
   echo "Installing cloud provider azure"
 
   helm install cloud-provider-azure "${REPO_ROOT}"/helm/cloud-provider-azure --values helm/cloud-provider-azure/values.yaml \
@@ -161,10 +163,8 @@ function create_workload_cluster() {
     --set-string cloudNodeManager.imageTag="${AZURE_CLOUD_NODE_MANAGER_IMG_TAG}" \
     --set cloudNodeManager.enableHealthProbeProxy=true \
     --set-string WINDOWS_VM_CA="${WINDOWS_VM_CA}"
-
-  echo "Run \"kubectl --kubeconfig=.${GENERATED_KUBECONFIG_DIRECTORY}/${CLUSTER_NAME}-kubeconfig ...\" to work with the new target cluster, It may cost up to several minutes until all agent nodes show up. After that, do not forget to install a network plugin to make all nodes Ready."
-
-  kubectl --kubeconfig="${GENERATED_KUBECONFIG_DIRECTORY}"/${CLUSTER_NAME}-kubeconfig apply -f https://raw.githubusercontent.com/kubernetes-sigs/cluster-api-provider-azure/main/templates/addons/calico.yaml
+  
+  echo "Run \"kubectl --kubeconfig=.${GENERATED_KUBECONFIG_DIRECTORY}/${CLUSTER_NAME}-kubeconfig ...\" to work with the new target cluster, It may cost up to several minutes until all agent nodes show up."
 }
 
 create_management_cluster

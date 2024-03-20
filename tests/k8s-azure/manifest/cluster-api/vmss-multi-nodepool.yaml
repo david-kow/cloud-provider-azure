@@ -36,20 +36,33 @@ spec:
       - name: control-plane-subnet
         role: control-plane
         cidrBlocks:
-          - 172.17.1.0/24
+          - ${AZURE_CONTROL_PLANE_CIDR}
       - name: node-subnet
         role: node
         cidrBlocks:
-          - 172.17.2.0/24
+          - ${AZURE_NODE_CIDR}
+        securityGroup:
+          name: ${CLUSTER_NAME}-node-nsg
+          securityRules:
+            - name: "allow_vnet_any_inbound"
+              description: "Allow inbound traffic from vnet"
+              direction: "Inbound"
+              priority: 510
+              protocol: "*"
+              destination: "*"
+              destinationPorts: "*"
+              source: "VirtualNetwork"
+              sourcePorts: "*"
+              action: "Allow"
         natGateway:
           name: node-natgateway
     vnet:
       name: ${AZURE_VNET}
       cidrBlocks:
-        - 172.17.0.0/16
+        - ${AZURE_VNET_CIDR}
       peerings:
-      - resourceGroup: shudhar-slb-test-RG
-        remoteVnetName: VNet
+      - resourceGroup: ${AZURE_PEERING_RESOURCE_GROUP}
+        remoteVnetName: ${AZURE_PEERING_VNET}
   resourceGroup: ${AZURE_RESOURCE_GROUP}
   subscriptionID: ${AZURE_SUBSCRIPTION_ID}
 ---
