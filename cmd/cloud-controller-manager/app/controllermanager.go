@@ -406,6 +406,7 @@ func startControllers(ctx context.Context, controllerContext genericcontrollerma
 	klog.V(2).Infof("startControllers: starting shared informers")
 	completedConfig.SharedInformers.Start(stopCh)
 	controllerContext.InformerFactory.Start(stopCh)
+	completedConfig.DynamicInformers.Start(stopCh)
 
 	<-stopCh
 	klog.V(1).Infof("startControllers: received stopping signal, exiting")

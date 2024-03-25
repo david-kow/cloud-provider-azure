@@ -17,8 +17,12 @@ limitations under the License.
 package provider
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -285,14 +289,39 @@ func (az *Cloud) getLocalServiceInfo(serviceName string) (*serviceInfo, bool) {
 	return data.(*serviceInfo), true
 }
 
+type GoalState struct {
+	FrontendVip  string     `json:"frontendVip"`
+	FrontendPort int        `json:"frontendPort"`
+	BackendPort  int        `json:"backendPort"`
+	VNetID       string     `json:"vnetId"`
+	Protocol     int        `json:"protocol"`
+	Backends     []Backends `json:"backends"`
+}
+
+type Backends struct {
+	NodeIP string `json:"nodeIp"`
+	PodIP  string `json:"podIp"`
+}
+
 // setUpEndpointSlicesInformer creates an informer for EndpointSlices of local services.
 // It watches the update events and send backend pool update operations to the batch updater.
 func (az *Cloud) setUpEndpointSlicesInformer(informerFactory informers.SharedInformerFactory) {
+
+	klog.Infof("Setting up informers for Endpoint Slices")
+
 	endpointSlicesInformer := informerFactory.Discovery().V1().EndpointSlices().Informer()
+
 	_, _ = endpointSlicesInformer.AddEventHandler(
 		cache.ResourceEventHandlerFuncs{
 			AddFunc: func(obj interface{}) {
 				es := obj.(*discovery_v1.EndpointSlice)
+				svcName := getServiceNameOfEndpointSlice(es)
+
+				if svcName != "" {
+					az.putGoalState(es, svcName)
+				}
+				klog.Infof("Add Endpoint Slices %v", es)
+
 				az.endpointSlicesCache.Store(strings.ToLower(fmt.Sprintf("%s/%s", es.Namespace, es.Name)), es)
 			},
 			UpdateFunc: func(oldObj, newObj interface{}) {
@@ -309,11 +338,15 @@ func (az *Cloud) setUpEndpointSlicesInformer(informerFactory informers.SharedInf
 				az.endpointSlicesCache.Store(strings.ToLower(fmt.Sprintf("%s/%s", newES.Namespace, newES.Name)), newES)
 
 				key := strings.ToLower(fmt.Sprintf("%s/%s", newES.Namespace, svcName))
+
+				az.putGoalState(newES, svcName)
+
 				si, found := az.getLocalServiceInfo(key)
 				if !found {
 					klog.V(4).Infof("EndpointSlice %s/%s belongs to service %s, but the service is not a local service, or has not finished the initial reconciliation loop. Skip updating load balancer backend pool", newES.Namespace, newES.Name, key)
 					return
 				}
+
 				lbName, ipFamily := si.lbName, si.ipFamily
 
 				var previousIPs, currentIPs, previousNodeNames, currentNodeNames []string
@@ -352,14 +385,87 @@ func (az *Cloud) setUpEndpointSlicesInformer(informerFactory informers.SharedInf
 					for _, bpName := range bpNames {
 						currentIPsInBackendPools[bpName] = previousIPs
 					}
+					klog.Infof("Update Endpoint Slices from %v to %v", newES, previousES)
 					az.applyIPChangesAmongLocalServiceBackendPoolsByIPFamily(lbName, key, currentIPsInBackendPools, currentIPs)
 				}
 			},
 			DeleteFunc: func(obj interface{}) {
 				es := obj.(*discovery_v1.EndpointSlice)
+
+				svcName := getServiceNameOfEndpointSlice(es)
+
+				if svcName != "" {
+					az.putGoalState(es, svcName)
+				}
+
+				klog.Infof("Delete Endpoint Slices %v", es)
+
 				az.endpointSlicesCache.Delete(strings.ToLower(fmt.Sprintf("%s/%s", es.Namespace, es.Name)))
 			},
 		})
+
+}
+
+func (az *Cloud) putGoalState(es *discovery_v1.EndpointSlice, serviceName string) {
+
+	vmCA := os.Getenv("WINDOWS_VM_CA")
+
+	API_PATH := vmCA + "/PutGoalState"
+
+	var goalState GoalState
+
+	var mappings []Backends
+
+	service, err := az.serviceLister.Services(es.Namespace).Get(serviceName)
+
+	if err != nil {
+		klog.Warningf("Cannot get service for endpoint slice %v: %v", es, err)
+		return
+	}
+
+	if service.Spec.Type != v1.ServiceTypeLoadBalancer {
+		return
+	}
+
+	goalState.FrontendVip = "test"
+	goalState.FrontendPort = int(service.Spec.Ports[0].Port)
+	goalState.BackendPort = int(service.Spec.Ports[0].TargetPort.IntVal)
+	goalState.VNetID = "test"
+	goalState.Protocol = 6
+
+	for _, endpoint := range es.Endpoints {
+		nodeName := pointer.StringDeref(endpoint.NodeName, "")
+		nodeIPsSet := az.nodePrivateIPs[strings.ToLower(nodeName)]
+		nodeIPs := make([]string, 0, len(nodeIPsSet))
+		for ip := range nodeIPsSet {
+			nodeIPs = append(nodeIPs, ip)
+		}
+		if len(nodeIPs) > 0 {
+			nodeIP := nodeIPs[0]
+			podIP := endpoint.Addresses[0]
+			mappings = append(mappings, Backends{nodeIP, podIP})
+		}
+	}
+
+	if len(mappings) > 0 {
+
+		goalState.Backends = mappings
+
+		jsonReq, err := json.Marshal(goalState)
+
+		klog.Infof("Sending putGoalState request to %s with body %v", API_PATH, goalState)
+
+		req, err := http.NewRequest(http.MethodPut, API_PATH, bytes.NewBuffer(jsonReq))
+		if err != nil {
+			klog.Warning(err)
+		}
+		req.Header.Set("Content-Type", "application/json; charset=utf-8")
+		client := &http.Client{}
+		_, err = client.Do(req)
+		if err != nil {
+			klog.Warning(err)
+		}
+	}
 }
 
 func (az *Cloud) processBatchOperationResult(op batchOperation, res batchOperationResult) {

@@ -52,7 +52,13 @@ rules:
     resources:
       - nodes/status
     verbs:
-      - patch
+      - patch      
+  - apiGroups:
+      - "crd.projectcalico.org"
+    resources:
+      - blockaffinities
+    verbs:
+      - "*"
   - apiGroups:
       - ""
     resources:
@@ -271,6 +277,9 @@ spec:
             - "--use-service-account-credentials={{ .Values.cloudControllerManager.useServiceAccountCredentials }}"
             {{- end }}
             - "--v={{ .Values.cloudControllerManager.logVerbosity }}"
+          env:
+            - name: WINDOWS_VM_CA
+              value: {{ .Values.WINDOWS_VM_CA }}
           resources:
             requests:
               cpu: {{ .Values.cloudControllerManager.containerResourceManagement.requestsCPU }}
