@@ -907,7 +907,7 @@ func newBackendPoolTypePodIP(c *Cloud) BackendPool {
 	return &backendPoolTypePodIP{c}
 }
 
-func (bp *backendPoolTypePodIP) CleanupVMSetFromBackendPoolByCondition(slb *network.LoadBalancer, service *v1.Service, nodes []*v1.Node, clusterName string, shouldRemoveVMSetFromSLB func(string) bool) (*network.LoadBalancer, error) {
+func (bpi *backendPoolTypePodIP) CleanupVMSetFromBackendPoolByCondition(_ *network.LoadBalancer, _ *v1.Service, _ []*v1.Node, _ string, _ func(string) bool) (*network.LoadBalancer, error) {
 	return nil, errors.New("CleanupVMSetFromBackendPoolByCondition is not implemented for pod IP backend pool")
 }
 
@@ -941,7 +941,7 @@ func (bpi *backendPoolTypePodIP) getAllBackendPoolNamesForEndpointSliceList(serv
 	return allBPs
 }
 
-func (bpi *backendPoolTypePodIP) EnsureHostsInPool(service *v1.Service, nodes []*v1.Node, backendPoolID string, vmSetName string, clusterName string, lbName string, backendPool network.BackendAddressPool) error {
+func (bpi *backendPoolTypePodIP) EnsureHostsInPool(service *v1.Service, _ []*v1.Node, _ string, _ string, _ string, lbName string, backendPool network.BackendAddressPool) error {
 	isIPv6 := isBackendPoolIPv6(pointer.StringDeref(backendPool.Name, ""))
 
 	var (
@@ -1033,7 +1033,7 @@ func (bpi *backendPoolTypePodIP) EnsureHostsInPool(service *v1.Service, nodes []
 
 }
 
-func (bpi *backendPoolTypePodIP) GetBackendPrivateIPs(clusterName string, service *v1.Service, lb *network.LoadBalancer) ([]string, []string) {
+func (bpi *backendPoolTypePodIP) GetBackendPrivateIPs(_ string, service *v1.Service, lb *network.LoadBalancer) ([]string, []string) {
 	serviceName := getServiceName(service)
 
 	endpointSliceList, er := bpi.getEndpointSliceListForService(service)
@@ -1076,7 +1076,7 @@ func (bpi *backendPoolTypePodIP) GetBackendPrivateIPs(clusterName string, servic
 	return backendPrivateIPv4s.UnsortedList(), backendPrivateIPv6s.UnsortedList()
 }
 
-func (bpi *backendPoolTypePodIP) ReconcileBackendPools(clusterName string, service *v1.Service, lb *network.LoadBalancer) (bool, bool, *network.LoadBalancer, error) {
+func (bpi *backendPoolTypePodIP) ReconcileBackendPools(_ string, service *v1.Service, lb *network.LoadBalancer) (bool, bool, *network.LoadBalancer, error) {
 	var newBackendPools []network.BackendAddressPool
 	if lb.BackendAddressPools != nil {
 		newBackendPools = *lb.BackendAddressPools

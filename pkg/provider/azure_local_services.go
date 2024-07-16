@@ -494,7 +494,7 @@ func (az *Cloud) getBackendPoolNamesForEndpointSliceList(service *v1.Service, en
 	return backendPoolNames
 }
 
-func (az *Cloud) getPodBackendPoolIdForEndpointSlice(service *v1.Service, endpointSlice *discovery_v1.EndpointSlice, lbName string, ipv6 bool) string {
+func (az *Cloud) getPodBackendPoolIDForEndpointSlice(service *v1.Service, endpointSlice *discovery_v1.EndpointSlice, lbName string, ipv6 bool) string {
 	return az.getBackendPoolID(lbName, az.getBackendPoolNameForEndpointSlice(service, endpointSlice, ipv6))
 }
 
@@ -511,9 +511,9 @@ func (az *Cloud) getPodBackendPoolIDsForService(service *v1.Service, lbName stri
 
 	for _, endpointSlice := range endpointSliceList {
 		if endpointSlice.AddressType == discovery_v1.AddressTypeIPv6 {
-			ipv6 = append(ipv6, az.getPodBackendPoolIdForEndpointSlice(service, endpointSlice, lbName, true))
+			ipv6 = append(ipv6, az.getPodBackendPoolIDForEndpointSlice(service, endpointSlice, lbName, true))
 		} else {
-			ipv4 = append(ipv4, az.getPodBackendPoolIdForEndpointSlice(service, endpointSlice, lbName, false))
+			ipv4 = append(ipv4, az.getPodBackendPoolIDForEndpointSlice(service, endpointSlice, lbName, false))
 		}
 	}
 	return map[bool][]string{
