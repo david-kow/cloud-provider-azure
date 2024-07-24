@@ -210,10 +210,10 @@ func (updater *loadBalancerBackendPoolUpdater) process() {
 			lbOp := op.(*loadBalancerBackendPoolUpdateOperation)
 			switch lbOp.kind {
 			case consts.LoadBalancerBackendPoolUpdateOperationRemove:
-				removed := removeNodeIPAddressesFromBackendPool(bp, lbOp.nodeIPs, false, true)
+				removed := removeIPAddressesFromBackendPool(bp, lbOp.nodeIPs, false, true)
 				changed = changed || removed
 			case consts.LoadBalancerBackendPoolUpdateOperationAdd:
-				added := updater.az.addNodeIPAddressesToBackendPool(&bp, lbOp.nodeIPs)
+				added := updater.az.addIPAddressesToBackendPool(&bp, lbOp.nodeIPs)
 				changed = changed || added
 			default:
 				panic("loadBalancerBackendPoolUpdater.process: unknown operation type")
@@ -424,6 +424,99 @@ func (az *Cloud) getBackendPoolNamesForService(service *v1.Service, clusterName 
 	return map[bool]string{
 		consts.IPVersionIPv4: getLocalServiceBackendPoolName(getServiceName(service), false),
 		consts.IPVersionIPv6: getLocalServiceBackendPoolName(getServiceName(service), true),
+	}
+}
+
+// TODO (anujbansal): Check for race condition between this flow and ES changes through informer
+func (az *Cloud) getEndpointSliceListForService(service *v1.Service) ([]*discovery_v1.EndpointSlice, error) {
+	var (
+		esList       []*discovery_v1.EndpointSlice
+		foundInCache bool
+	)
+
+	az.endpointSlicesCache.Range(func(key, value interface{}) bool {
+		endpointSlice := value.(*discovery_v1.EndpointSlice)
+		if strings.EqualFold(getServiceNameOfEndpointSlice(endpointSlice), service.Name) &&
+			strings.EqualFold(endpointSlice.Namespace, service.Namespace) {
+			esList = append(esList, endpointSlice)
+			foundInCache = true
+		}
+		return true
+	})
+
+	if len(esList) == 0 {
+		klog.Infof("EndpointSlice for service %s/%s not found, try to list EndpointSlices", service.Namespace, service.Name)
+		eps, err := az.KubeClient.DiscoveryV1().EndpointSlices(service.Namespace).List(context.Background(), metav1.ListOptions{})
+		if err != nil {
+			klog.Errorf("Failed to list EndpointSlices for service %s/%s: %s", service.Namespace, service.Name, err.Error())
+			return nil, err
+		}
+		for _, endpointSlice := range eps.Items {
+			endpointSlice := endpointSlice
+			if strings.EqualFold(getServiceNameOfEndpointSlice(&endpointSlice), service.Name) {
+				esList = append(esList, &endpointSlice)
+
+				if !foundInCache {
+					az.endpointSlicesCache.Store(strings.ToLower(fmt.Sprintf("%s/%s", endpointSlice.Namespace, endpointSlice.Name)), endpointSlice)
+				}
+			}
+		}
+	}
+	if len(esList) == 0 {
+		return nil, fmt.Errorf("failed to find EndpointSlice for service %s/%s", service.Namespace, service.Name)
+	}
+
+	return esList, nil
+}
+
+func (az *Cloud) getBackendPoolNameForEndpointSlice(service *v1.Service, endpointSlice *discovery_v1.EndpointSlice, isIPv6 bool) string {
+	endpointSliceName := strings.ToLower(strings.Replace(endpointSlice.Name, "/", "-", -1))
+	if isIPv6 {
+		return fmt.Sprintf("%s-%s-%s", service.Namespace, endpointSliceName, consts.IPVersionIPv6StringLower)
+	}
+	return fmt.Sprintf("%s-%s", service.Namespace, endpointSliceName)
+}
+
+func (az *Cloud) getBackendPoolNamesForEndpointSliceList(service *v1.Service, endpointSliceList []*discovery_v1.EndpointSlice, isIPv6 bool) *utilsets.IgnoreCaseSet {
+	backendPoolNames := utilsets.NewString()
+
+	for _, endpointSlice := range endpointSliceList {
+		if endpointSlice.AddressType == discovery_v1.AddressTypeIPv6 && !isIPv6 {
+			continue
+		}
+		if endpointSlice.AddressType == discovery_v1.AddressTypeIPv4 && isIPv6 {
+			continue
+		}
+		backendPoolNames.Insert(az.getBackendPoolNameForEndpointSlice(service, endpointSlice, isIPv6))
+	}
+	return backendPoolNames
+}
+
+func (az *Cloud) getPodBackendPoolIDForEndpointSlice(service *v1.Service, endpointSlice *discovery_v1.EndpointSlice, lbName string, ipv6 bool) string {
+	return az.getBackendPoolID(lbName, az.getBackendPoolNameForEndpointSlice(service, endpointSlice, ipv6))
+}
+
+func (az *Cloud) getPodBackendPoolIDsForService(service *v1.Service, lbName string) map[bool][]string {
+
+	ipv4 := []string{}
+	ipv6 := []string{}
+
+	endpointSliceList, err := az.getEndpointSliceListForService(service)
+
+	if err != nil {
+		klog.Errorf("getPodBackendPoolIDsForServices: failed to list EndpointSlices for service %s/%s: %s", service.Namespace, service.Name, err.Error())
+	}
+
+	for _, endpointSlice := range endpointSliceList {
+		if endpointSlice.AddressType == discovery_v1.AddressTypeIPv6 {
+			ipv6 = append(ipv6, az.getPodBackendPoolIDForEndpointSlice(service, endpointSlice, lbName, true))
+		} else {
+			ipv4 = append(ipv4, az.getPodBackendPoolIDForEndpointSlice(service, endpointSlice, lbName, false))
+		}
+	}
+	return map[bool][]string{
+		consts.IPVersionIPv4: ipv4,
+		consts.IPVersionIPv6: ipv6,
 	}
 }
 
