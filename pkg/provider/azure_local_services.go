@@ -315,8 +315,8 @@ func (az *Cloud) setUpEndpointSlicesInformer(informerFactory informers.SharedInf
 					klog.V(4).Infof("EndpointSlice %s/%s belongs to service %s, but the service is not a local service, or has not finished the initial reconciliation loop. Skip updating load balancer backend pool", newES.Namespace, newES.Name, key)
 					return
 				}
-				lbName, ipFamily := si.lbName, si.ipFamily
-
+				// lbName, ipFamily := si.lbName, si.ipFamily
+				ipFamily := si.ipFamily
 				var previousIPs, currentIPs, previousNodeNames, currentNodeNames []string
 				if previousES != nil {
 					for _, ep := range previousES.Endpoints {
@@ -353,7 +353,8 @@ func (az *Cloud) setUpEndpointSlicesInformer(informerFactory informers.SharedInf
 					for _, bpName := range bpNames {
 						currentIPsInBackendPools[bpName] = previousIPs
 					}
-					az.applyIPChangesAmongLocalServiceBackendPoolsByIPFamily(lbName, key, currentIPsInBackendPools, currentIPs)
+					//TODO (anujbansal): Uncomment this
+					// az.applyIPChangesAmongLocalServiceBackendPoolsByIPFamily(lbName, key, currentIPsInBackendPools, currentIPs)
 				}
 			},
 			DeleteFunc: func(obj interface{}) {

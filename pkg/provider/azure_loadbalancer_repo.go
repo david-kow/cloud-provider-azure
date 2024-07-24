@@ -192,7 +192,8 @@ func (az *Cloud) CreateOrUpdateLBBackendPool(lbName string, backendPool network.
 	ctx, cancelFunc := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancelFunc()
 	klog.V(4).Infof("CreateOrUpdateLBBackendPool: updating backend pool %s in LB %s", pointer.StringDeref(backendPool.Name, ""), lbName)
-	rerr := az.LoadBalancerClient.CreateOrUpdateBackendPools(ctx, az.getLoadBalancerResourceGroup(), lbName, pointer.StringDeref(backendPool.Name, ""), backendPool, pointer.StringDeref(backendPool.Etag, ""))
+	// Calling without ETAG as ETAG gets updated on first backend pool update for the next backend pool as well
+	rerr := az.LoadBalancerClient.CreateOrUpdateBackendPools(ctx, az.getLoadBalancerResourceGroup(), lbName, pointer.StringDeref(backendPool.Name, ""), backendPool, "")
 	if rerr == nil {
 		// Invalidate the cache right after updating
 		_ = az.lbCache.Delete(lbName)
