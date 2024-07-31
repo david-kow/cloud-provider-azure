@@ -994,7 +994,7 @@ func (bpi *backendPoolTypePodIP) EnsureHostsInPool(service *v1.Service, _ []*v1.
 			}
 
 			// check if endpoint slice corresponds to given backend pool
-			if bpi.getBackendPoolNameForEndpointSlice(service, es, isIPv6) == lbBackendPoolName {
+			if bpi.getBackendPoolNameForEndpointSlice(es, isIPv6) == lbBackendPoolName {
 				ES = es
 				break
 			}
@@ -1087,53 +1087,70 @@ func (bpi *backendPoolTypePodIP) GetBackendPrivateIPs(_ string, service *v1.Serv
 	return backendPrivateIPv4s.UnsortedList(), backendPrivateIPv6s.UnsortedList()
 }
 
+func getLBRulesForService(lb *network.LoadBalancer, serviceUID string) []network.LoadBalancingRule {
+	matchingRules := make([]network.LoadBalancingRule, 0)
+	for _, rule := range *lb.LoadBalancingRules {
+		if strings.HasPrefix(pointer.StringDeref(rule.Name, ""), serviceUID) {
+			matchingRules = append(matchingRules, rule)
+		}
+	}
+	return matchingRules
+}
+
+func getBackendPoolNamesFromLBRules(lbRulesForService []network.LoadBalancingRule) []string {
+	var backendPools []string
+
+	for _, rule := range lbRulesForService {
+		if rule.BackendAddressPools != nil {
+			for _, pool := range *rule.BackendAddressPools {
+				if pool.ID != nil {
+					backendPools = append(backendPools, getBackendPoolNameFromID(*pool.ID))
+				}
+			}
+		}
+	}
+	return backendPools
+}
+
+func getBackendPoolNameFromID(id string) string {
+	parts := strings.Split(id, "/")
+	return parts[len(parts)-1]
+}
+
 func (bpi *backendPoolTypePodIP) ReconcileBackendPools(_ string, service *v1.Service, lb *network.LoadBalancer) (bool, bool, *network.LoadBalancer, error) {
-	var newBackendPools []network.BackendAddressPool
-	if lb.BackendAddressPools != nil {
-		newBackendPools = *lb.BackendAddressPools
+	lbRulesForService := getLBRulesForService(lb, string(service.GetUID()))
+	serviceBackendPoolNames := utilsets.NewString()
+
+	for _, bp := range getBackendPoolNamesFromLBRules(lbRulesForService) {
+		serviceBackendPoolNames.Insert(bp)
 	}
 
-	var backendPoolsUpdated, shouldRefreshLB bool
+	var backendPoolsUpdated bool
 	foundBackendPools := utilsets.NewString()
-	lbName := *lb.Name
 	serviceName := getServiceName(service)
-
 	endpointSliceList, er := bpi.getEndpointSliceListForService(service)
 
 	if er != nil {
-		klog.Errorf("bpi.ReconcileBackendPools: failed to get endpoint slice list for service %q, error: %s", service.Name, er.Error())
+		klog.Errorf("bpi.ReconcileBackendPools: failed to get endpoint slice list for service %q, error: %s", serviceName, er.Error())
 		return false, false, nil, er
 	}
 
-	lbBackendPoolNames := bpi.getAllBackendPoolNamesForEndpointSliceList(service, endpointSliceList)
+	expectedBackendPoolNames := bpi.getAllBackendPoolNamesForEndpointSliceList(service, endpointSliceList)
 	// bp is never preconfigured in case of pods
 	isBackendPoolPreConfigured := false
 
-	var (
-		err error
-	)
-	for i := len(newBackendPools) - 1; i >= 0; i-- {
-		bp := newBackendPools[i]
-		found := lbBackendPoolNames.Has(pointer.StringDeref(bp.Name, ""))
+	for _, bp := range serviceBackendPoolNames.UnsortedList() {
+		found := expectedBackendPoolNames.Has(bp)
 		if found {
 			klog.V(10).Infof("bpi.ReconcileBackendPools for service (%s): found wanted backendpool. Not adding anything", serviceName)
-			foundBackendPools.Insert(*bp.Name)
+			foundBackendPools.Insert(bp)
 		} else {
-			klog.V(10).Infof("bpi.ReconcileBackendPools for service (%s): found unmanaged backendpool %s", serviceName, *bp.Name)
-			//TODO: (anujbansal) Uncomment and prevent deletion of default backend pools (kubernetes and aksOutboundBackendPool)
-			// removeBackendPool(lb, *bp.Name)
+			klog.V(10).Infof("bpi.ReconcileBackendPools for service (%s): found unmanaged backendpool %s", serviceName, bp)
+			removeBackendPool(lb, bp)
 		}
 	}
 
-	if shouldRefreshLB {
-		klog.V(4).Infof("bpi.ReconcileBackendPools for service(%s): refreshing load balancer %s", serviceName, lbName)
-		lb, _, err = bpi.getAzureLoadBalancer(lbName, cache.CacheReadTypeForceRefresh)
-		if err != nil {
-			return false, false, nil, fmt.Errorf("bpi.ReconcileBackendPools for service (%s): failed to get loadbalancer %s: %w", serviceName, lbName, err)
-		}
-	}
-
-	for _, bp := range lbBackendPoolNames.UnsortedList() {
+	for _, bp := range expectedBackendPoolNames.UnsortedList() {
 		if foundBackendPools.Has(bp) {
 			continue
 		}

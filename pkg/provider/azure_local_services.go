@@ -435,6 +435,10 @@ func (az *Cloud) getEndpointSliceListForService(service *v1.Service) ([]*discove
 		foundInCache bool
 	)
 
+	if service.Spec.Type != v1.ServiceTypeLoadBalancer {
+		return esList, nil
+	}
+
 	az.endpointSlicesCache.Range(func(key, value interface{}) bool {
 		endpointSlice := value.(*discovery_v1.EndpointSlice)
 		if strings.EqualFold(getServiceNameOfEndpointSlice(endpointSlice), service.Name) &&
@@ -470,12 +474,11 @@ func (az *Cloud) getEndpointSliceListForService(service *v1.Service) ([]*discove
 	return esList, nil
 }
 
-func (az *Cloud) getBackendPoolNameForEndpointSlice(service *v1.Service, endpointSlice *discovery_v1.EndpointSlice, isIPv6 bool) string {
-	endpointSliceName := strings.ToLower(strings.Replace(endpointSlice.Name, "/", "-", -1))
+func (az *Cloud) getBackendPoolNameForEndpointSlice(endpointSlice *discovery_v1.EndpointSlice, isIPv6 bool) string {
 	if isIPv6 {
-		return fmt.Sprintf("%s-%s-%s", service.Namespace, endpointSliceName, consts.IPVersionIPv6StringLower)
+		return fmt.Sprintf("%s-%s", endpointSlice.GetUID(), consts.IPVersionIPv6StringLower)
 	}
-	return fmt.Sprintf("%s-%s", service.Namespace, endpointSliceName)
+	return fmt.Sprintf("%s", endpointSlice.GetUID())
 }
 
 func (az *Cloud) getBackendPoolNamesForEndpointSliceList(service *v1.Service, endpointSliceList []*discovery_v1.EndpointSlice, isIPv6 bool) *utilsets.IgnoreCaseSet {
@@ -488,13 +491,13 @@ func (az *Cloud) getBackendPoolNamesForEndpointSliceList(service *v1.Service, en
 		if endpointSlice.AddressType == discovery_v1.AddressTypeIPv4 && isIPv6 {
 			continue
 		}
-		backendPoolNames.Insert(az.getBackendPoolNameForEndpointSlice(service, endpointSlice, isIPv6))
+		backendPoolNames.Insert(az.getBackendPoolNameForEndpointSlice(endpointSlice, isIPv6))
 	}
 	return backendPoolNames
 }
 
 func (az *Cloud) getPodBackendPoolIDForEndpointSlice(service *v1.Service, endpointSlice *discovery_v1.EndpointSlice, lbName string, ipv6 bool) string {
-	return az.getBackendPoolID(lbName, az.getBackendPoolNameForEndpointSlice(service, endpointSlice, ipv6))
+	return az.getBackendPoolID(lbName, az.getBackendPoolNameForEndpointSlice(endpointSlice, ipv6))
 }
 
 func (az *Cloud) getPodBackendPoolIDsForService(service *v1.Service, lbName string) map[bool][]string {
