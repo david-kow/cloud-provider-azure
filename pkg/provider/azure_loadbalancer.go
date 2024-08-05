@@ -142,6 +142,7 @@ func (az *Cloud) reconcileService(_ context.Context, clusterName string, service
 		}
 	}
 
+	//TODO: (anujbansal) We cannot reconcile SG for constant pod es updates, should we add the subnet once?
 	serviceIPs := lbIPsPrimaryPIPs
 	klog.V(2).Infof("reconcileService: reconciling security group for service %q with IPs %q, wantLb = true", serviceName, serviceIPs)
 	if _, err := az.reconcileSecurityGroup(clusterName, service, ptr.Deref(lb.Name, ""), fipConfigs, serviceIPs, true /* wantLb */); err != nil {
@@ -172,13 +173,16 @@ func (az *Cloud) reconcileService(_ context.Context, clusterName string, service
 
 	lbName := strings.ToLower(pointer.StringDeref(lb.Name, ""))
 	key := strings.ToLower(serviceName)
-	if az.useMultipleStandardLoadBalancers() && isLocalService(service) {
+	if isLocalService(service) && (az.useMultipleStandardLoadBalancers() || az.LoadBalancerBackendPoolConfigurationType == consts.LoadBalancerBackendPoolConfigurationTypePodIP) {
 		az.localServiceNameToServiceInfoMap.Store(key, newServiceInfo(getServiceIPFamily(service), lbName))
 		// There are chances that the endpointslice changes after EnsureHostsInPool, so
 		// need to check endpointslice for a second time.
-		if err := az.checkAndApplyLocalServiceBackendPoolUpdates(*lb, service); err != nil {
-			klog.Errorf("failed to checkAndApplyLocalServiceBackendPoolUpdates: %v", err)
-			return nil, err
+
+		if az.LoadBalancerBackendPoolConfigurationType != consts.LoadBalancerBackendPoolConfigurationTypePodIP {
+			if err := az.checkAndApplyLocalServiceBackendPoolUpdates(*lb, service); err != nil {
+				klog.Errorf("failed to checkAndApplyLocalServiceBackendPoolUpdates: %v", err)
+				return nil, err
+			}
 		}
 	} else {
 		az.localServiceNameToServiceInfoMap.Delete(key)
@@ -1631,7 +1635,9 @@ func (az *Cloud) reconcileLoadBalancer(clusterName string, service *v1.Service, 
 	// Delete backend pools for local service if:
 	// 1. the cluster is migrating from multi-slb to single-slb,
 	// 2. the service is changed from local to cluster.
-	if !az.useMultipleStandardLoadBalancers() || !isLocalService(service) {
+	//TODO: (anujbansal) Check how we want to handle this cleanup, skipping for clb for now
+	if (!az.useMultipleStandardLoadBalancers() || !isLocalService(service)) && az.LoadBalancerBackendPoolConfigurationType != consts.LoadBalancerBackendPoolConfigurationTypePodIP {
+		klog.V(2).Infof("reconcileLoadBalancer cleanup backend pool %s", serviceName)
 		existingLBs, err = az.cleanupLocalServiceBackendPool(service, nodes, existingLBs, clusterName)
 		if err != nil {
 			klog.Errorf("reconcileLoadBalancer: failed to cleanup local service backend pool for service %q, error: %s", serviceName, err.Error())
@@ -1653,7 +1659,15 @@ func (az *Cloud) reconcileLoadBalancer(clusterName string, service *v1.Service, 
 
 	lbName := *lb.Name
 	lbResourceGroup := az.getLoadBalancerResourceGroup()
+	lbPodBackendPoolIDs := map[bool][]string{}
+
+	if az.LoadBalancerBackendPoolConfigurationType == consts.LoadBalancerBackendPoolConfigurationTypePodIP {
+		lbPodBackendPoolIDs = az.getPodBackendPoolIDsForService(service, lbName)
+
+	}
+
 	lbBackendPoolIDs := az.getBackendPoolIDsForService(service, clusterName, lbName)
+
 	klog.V(2).Infof("reconcileLoadBalancer for service(%s): lb(%s/%s) wantLb(%t) resolved load balancer name",
 		serviceName, lbResourceGroup, lbName, wantLb)
 	lbFrontendIPConfigNames := az.getFrontendIPConfigNames(service)
@@ -1718,7 +1732,7 @@ func (az *Cloud) reconcileLoadBalancer(clusterName string, service *v1.Service, 
 	var expectedProbes []network.Probe
 	var expectedRules []network.LoadBalancingRule
 	getExpectedLBRule := func(isIPv6 bool) error {
-		expectedProbesSingleStack, expectedRulesSingleStack, err := az.getExpectedLBRules(service, lbFrontendIPConfigIDs[isIPv6], lbBackendPoolIDs[isIPv6], lbName, isIPv6)
+		expectedProbesSingleStack, expectedRulesSingleStack, err := az.getExpectedLBRules(service, lbFrontendIPConfigIDs[isIPv6], lbBackendPoolIDs[isIPv6], lbPodBackendPoolIDs[isIPv6], lbName, isIPv6)
 		if err != nil {
 			return err
 		}
@@ -1858,19 +1872,20 @@ func (az *Cloud) reconcileBackendPoolHosts(
 		if lb.LoadBalancerPropertiesFormat != nil && lb.LoadBalancerPropertiesFormat.BackendAddressPools != nil {
 			for i, backendPool := range *lb.LoadBalancerPropertiesFormat.BackendAddressPools {
 				isIPv6 := isBackendPoolIPv6(pointer.StringDeref(backendPool.Name, ""))
-				if strings.EqualFold(pointer.StringDeref(backendPool.Name, ""), az.getBackendPoolNameForService(service, clusterName, isIPv6)) {
-					if err := az.LoadBalancerBackendPool.EnsureHostsInPool(
-						service,
-						nodes,
-						lbBackendPoolIDs[isIPv6],
-						vmSetName,
-						clusterName,
-						lbName,
-						(*lb.LoadBalancerPropertiesFormat.BackendAddressPools)[i],
-					); err != nil {
-						return nil, err
-					}
+				//TODO: (anujbansal) We are performing this check here as well as in EnsureHostsInPool. If we want to keep this for pod bp, we need to get the endpoint slices here again
+				// if strings.EqualFold(pointer.StringDeref(backendPool.Name, ""), az.getBackendPoolNameForService(service, clusterName, isIPv6)) {
+				if err := az.LoadBalancerBackendPool.EnsureHostsInPool(
+					service,
+					nodes,
+					lbBackendPoolIDs[isIPv6],
+					vmSetName,
+					clusterName,
+					lbName,
+					(*lb.LoadBalancerPropertiesFormat.BackendAddressPools)[i],
+				); err != nil {
+					return nil, err
 				}
+				//}
 			}
 		}
 		if strings.EqualFold(lbName, *currentLB.Name) {
@@ -2586,6 +2601,7 @@ func (az *Cloud) getExpectedLBRules(
 	service *v1.Service,
 	lbFrontendIPConfigID string,
 	lbBackendPoolID string,
+	lbPodBackendPoolIDs []string,
 	lbName string,
 	isIPv6 bool) ([]network.Probe, []network.LoadBalancingRule, error) {
 
@@ -2691,7 +2707,7 @@ func (az *Cloud) getExpectedLBRules(
 			if err != nil {
 				return expectedProbes, expectedRules, fmt.Errorf("failed to parse transport protocol: %w", err)
 			}
-			props, err := az.getExpectedLoadBalancingRulePropertiesForPort(service, lbFrontendIPConfigID, lbBackendPoolID, port, *transportProto)
+			props, err := az.getExpectedLoadBalancingRulePropertiesForPort(service, lbFrontendIPConfigID, lbBackendPoolID, lbPodBackendPoolIDs, port, *transportProto)
 			if err != nil {
 				return expectedProbes, expectedRules, fmt.Errorf("error generate lb rule for ha mod loadbalancer. err: %w", err)
 			}
@@ -2739,10 +2755,11 @@ func (az *Cloud) getExpectedLBRules(
 }
 
 // getDefaultLoadBalancingRulePropertiesFormat returns the loadbalancing rule for one port
+// TODO: (anujbansal) Check how to handle lb rule updates for pods
 func (az *Cloud) getExpectedLoadBalancingRulePropertiesForPort(
 	service *v1.Service,
 	lbFrontendIPConfigID string,
-	lbBackendPoolID string, servicePort v1.ServicePort, transportProto network.TransportProtocol) (*network.LoadBalancingRulePropertiesFormat, error) {
+	lbBackendPoolID string, lbPodBackendPoolIDs []string, servicePort v1.ServicePort, transportProto network.TransportProtocol) (*network.LoadBalancingRulePropertiesFormat, error) {
 	var err error
 
 	loadDistribution := network.LoadDistributionDefault
@@ -2766,21 +2783,54 @@ func (az *Cloud) getExpectedLoadBalancingRulePropertiesForPort(
 		lbIdleTimeout = pointer.Int32(4)
 	}
 
-	props := &network.LoadBalancingRulePropertiesFormat{
-		Protocol:            transportProto,
-		FrontendPort:        pointer.Int32(servicePort.Port),
-		BackendPort:         pointer.Int32(servicePort.Port),
-		DisableOutboundSnat: pointer.Bool(az.disableLoadBalancerOutboundSNAT()),
-		EnableFloatingIP:    pointer.Bool(true),
-		LoadDistribution:    loadDistribution,
-		FrontendIPConfiguration: &network.SubResource{
-			ID: pointer.String(lbFrontendIPConfigID),
-		},
-		BackendAddressPool: &network.SubResource{
-			ID: pointer.String(lbBackendPoolID),
-		},
-		IdleTimeoutInMinutes: lbIdleTimeout,
+	props := &network.LoadBalancingRulePropertiesFormat{}
+
+	if az.LoadBalancerBackendPoolConfigurationType == consts.LoadBalancerBackendPoolConfigurationTypePodIP {
+
+		bps := []network.SubResource{}
+
+		for _, lbPodBackendPoolID := range lbPodBackendPoolIDs {
+			bps = append(bps, network.SubResource{ID: pointer.String(lbPodBackendPoolID)})
+		}
+
+		klog.Info("Got pod bps: ", bps)
+
+		props = &network.LoadBalancingRulePropertiesFormat{
+			Protocol:            transportProto,
+			FrontendPort:        pointer.Int32(servicePort.Port),
+			BackendPort:         pointer.Int32(servicePort.Port),
+			DisableOutboundSnat: pointer.Bool(az.disableLoadBalancerOutboundSNAT()),
+			EnableFloatingIP:    pointer.Bool(true),
+			LoadDistribution:    loadDistribution,
+			FrontendIPConfiguration: &network.SubResource{
+				ID: pointer.String(lbFrontendIPConfigID),
+			},
+			BackendAddressPool: &network.SubResource{
+				ID: pointer.String(lbPodBackendPoolIDs[0]),
+			},
+			IdleTimeoutInMinutes: lbIdleTimeout,
+		}
+
+		klog.Info("Lb rule props: ", props)
+
+	} else {
+		props = &network.LoadBalancingRulePropertiesFormat{
+			Protocol:            transportProto,
+			FrontendPort:        pointer.Int32(servicePort.Port),
+			BackendPort:         pointer.Int32(servicePort.Port),
+			DisableOutboundSnat: pointer.Bool(az.disableLoadBalancerOutboundSNAT()),
+			EnableFloatingIP:    pointer.Bool(true),
+			LoadDistribution:    loadDistribution,
+			FrontendIPConfiguration: &network.SubResource{
+				ID: pointer.String(lbFrontendIPConfigID),
+			},
+			BackendAddressPool: &network.SubResource{
+				ID: pointer.String(lbBackendPoolID),
+			},
+			IdleTimeoutInMinutes: lbIdleTimeout,
+		}
 	}
+
 	if strings.EqualFold(string(transportProto), string(network.TransportProtocolTCP)) && az.useStandardLoadBalancer() {
 		props.EnableTCPReset = pointer.Bool(!consts.IsTCPResetDisabled(service.Annotations))
 	}
@@ -2799,7 +2849,7 @@ func (az *Cloud) getExpectedHAModeLoadBalancingRuleProperties(
 	service *v1.Service,
 	lbFrontendIPConfigID string,
 	lbBackendPoolID string) (*network.LoadBalancingRulePropertiesFormat, error) {
-	props, err := az.getExpectedLoadBalancingRulePropertiesForPort(service, lbFrontendIPConfigID, lbBackendPoolID, v1.ServicePort{}, network.TransportProtocolAll)
+	props, err := az.getExpectedLoadBalancingRulePropertiesForPort(service, lbFrontendIPConfigID, lbBackendPoolID, []string{}, v1.ServicePort{}, network.TransportProtocolAll)
 	if err != nil {
 		return nil, fmt.Errorf("error generate lb rule for ha mod loadbalancer. err: %w", err)
 	}

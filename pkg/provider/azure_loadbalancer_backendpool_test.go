@@ -1011,7 +1011,7 @@ func TestRemoveNodeIPAddressFromBackendPool(t *testing.T) {
 			backendPool := buildTestLoadBalancerBackendPoolWithIPs("kubernetes", tc.existingIPs)
 			expectedBackendPool := buildTestLoadBalancerBackendPoolWithIPs("kubernetes", tc.expectedIPs)
 
-			removeNodeIPAddressesFromBackendPool(backendPool, tc.unwantedIPs, tc.removeAll, tc.useMultiSLB)
+			removeIPAddressesFromBackendPool(backendPool, tc.unwantedIPs, tc.removeAll, tc.useMultiSLB)
 			assert.Equal(t, expectedBackendPool, backendPool)
 		})
 	}

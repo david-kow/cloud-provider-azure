@@ -2945,7 +2945,7 @@ func TestReconcileLoadBalancerRuleCommon(t *testing.T) {
 			v4Enabled, v6Enabled := getIPFamiliesEnabled(&service)
 			if v4Enabled {
 				probe, lbrule, err := az.getExpectedLBRules(&service,
-					"frontendIPConfigID", "backendPoolID", "lbname", consts.IPVersionIPv4)
+					"frontendIPConfigID", "backendPoolID", []string{}, "lbname", consts.IPVersionIPv4)
 				if test.expectedErr {
 					assert.Error(t, err)
 				} else {
@@ -2961,7 +2961,7 @@ func TestReconcileLoadBalancerRuleCommon(t *testing.T) {
 					lbFrontendIPConfigID = "frontendIPConfigID-IPv6"
 				}
 				probe, lbrule, err := az.getExpectedLBRules(&service,
-					lbFrontendIPConfigID, lbBackendPoolID, "lbname", consts.IPVersionIPv6)
+					lbFrontendIPConfigID, lbBackendPoolID, []string{}, "lbname", consts.IPVersionIPv6)
 				if test.expectedErr {
 					assert.Error(t, err)
 				} else {
@@ -2990,7 +2990,7 @@ func TestGetExpectedLBRulesSharedProbe(t *testing.T) {
 			az.ClusterServiceLoadBalancerHealthProbeMode = consts.ClusterServiceLoadBalancerHealthProbeModeShared
 			svc := getTestService("test1", v1.ProtocolTCP, nil, false, 80, 81)
 
-			probe, lbrule, err := az.getExpectedLBRules(&svc, "frontendIPConfigID", "backendPoolID", "lbname", consts.IPVersionIPv4)
+			probe, lbrule, err := az.getExpectedLBRules(&svc, "frontendIPConfigID", "backendPoolID", []string{}, "lbname", consts.IPVersionIPv4)
 			assert.NoError(t, err)
 			assert.Equal(t, 1, len(probe))
 			assert.Equal(t, *az.buildClusterServiceSharedProbe(), probe[0])
