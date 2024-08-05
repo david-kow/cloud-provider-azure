@@ -933,10 +933,10 @@ func removeBackendPool(lb *network.LoadBalancer, lbBackendPoolName string) bool 
 	return false
 }
 
-func (bpi *backendPoolTypePodIP) getAllBackendPoolNamesForEndpointSliceList(service *v1.Service, endpointSliceList []*discovery_v1.EndpointSlice) *utilsets.IgnoreCaseSet {
+func (bpi *backendPoolTypePodIP) getAllBackendPoolNamesForEndpointSliceList(endpointSliceList []*discovery_v1.EndpointSlice) *utilsets.IgnoreCaseSet {
 	allBPs := utilsets.NewString()
-	ipv4 := bpi.getBackendPoolNamesForEndpointSliceList(service, endpointSliceList, false)
-	ipv6 := bpi.getBackendPoolNamesForEndpointSliceList(service, endpointSliceList, true)
+	ipv4 := bpi.getBackendPoolNamesForEndpointSliceList(endpointSliceList, false)
+	ipv6 := bpi.getBackendPoolNamesForEndpointSliceList(endpointSliceList, true)
 
 	allBPs.Insert(ipv4.UnsortedList()...)
 	allBPs.Insert(ipv6.UnsortedList()...)
@@ -960,7 +960,7 @@ func (bpi *backendPoolTypePodIP) EnsureHostsInPool(service *v1.Service, _ []*v1.
 		return err
 	}
 
-	lbBackendPoolNames := bpi.getBackendPoolNamesForEndpointSliceList(service, endpointSliceList, isIPv6)
+	lbBackendPoolNames := bpi.getBackendPoolNamesForEndpointSliceList(endpointSliceList, isIPv6)
 	lbBackendPoolName := pointer.StringDeref(backendPool.Name, "")
 
 	if lbBackendPoolNames.Has(lbBackendPoolName) &&
@@ -1054,7 +1054,7 @@ func (bpi *backendPoolTypePodIP) GetBackendPrivateIPs(_ string, service *v1.Serv
 		return nil, nil
 	}
 
-	lbBackendPoolNames := bpi.getAllBackendPoolNamesForEndpointSliceList(service, endpointSliceList)
+	lbBackendPoolNames := bpi.getAllBackendPoolNamesForEndpointSliceList(endpointSliceList)
 
 	if lb.LoadBalancerPropertiesFormat == nil || lb.LoadBalancerPropertiesFormat.BackendAddressPools == nil {
 		return nil, nil
@@ -1135,7 +1135,7 @@ func (bpi *backendPoolTypePodIP) ReconcileBackendPools(_ string, service *v1.Ser
 		return false, false, nil, er
 	}
 
-	expectedBackendPoolNames := bpi.getAllBackendPoolNamesForEndpointSliceList(service, endpointSliceList)
+	expectedBackendPoolNames := bpi.getAllBackendPoolNamesForEndpointSliceList(endpointSliceList)
 	// bp is never preconfigured in case of pods
 	isBackendPoolPreConfigured := false
 

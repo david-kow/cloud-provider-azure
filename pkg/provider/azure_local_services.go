@@ -286,8 +286,44 @@ func (az *Cloud) getLocalServiceInfo(serviceName string) (*serviceInfo, bool) {
 	return data.(*serviceInfo), true
 }
 
+func getIPsFromEndpointSlice(es *discovery_v1.EndpointSlice) []string {
+	var currentIPs []string
+
+	if es != nil {
+		for _, endpoint := range es.Endpoints {
+
+			if endpoint.Conditions.Ready != nil && !*endpoint.Conditions.Ready {
+
+				continue
+			}
+
+			currentIPs = append(currentIPs, endpoint.Addresses...)
+
+		}
+	}
+	return currentIPs
+}
+
+func (az *Cloud) createOrUpdateBackendPoolForES(es *discovery_v1.EndpointSlice, si *serviceInfo) {
+	currentIPs := getIPsFromEndpointSlice(es)
+
+	isIPv6 := es.AddressType == discovery_v1.AddressTypeIPv6
+	poolName := az.getBackendPoolNameForEndpointSlice(es, isIPv6)
+
+	bp := network.BackendAddressPool{
+		Name:                               &poolName,
+		BackendAddressPoolPropertiesFormat: &network.BackendAddressPoolPropertiesFormat{},
+	}
+
+	az.addIPAddressesToBackendPool(&bp, currentIPs)
+
+	klog.V(4).Infof("Creating or updating backend pool - %s", poolName)
+	az.LoadBalancerClient.CreateOrUpdateBackendPools(context.Background(), az.ResourceGroup, si.lbName, poolName, bp, pointer.StringDeref(bp.Etag, ""))
+}
+
 // setUpEndpointSlicesInformer creates an informer for EndpointSlices of local services.
 // It watches the update events and send backend pool update operations to the batch updater.
+// TODO (anujbansal): Handle LB rule update
 func (az *Cloud) setUpEndpointSlicesInformer(informerFactory informers.SharedInformerFactory) {
 	endpointSlicesInformer := informerFactory.Discovery().V1().EndpointSlices().Informer()
 	_, _ = endpointSlicesInformer.AddEventHandler(
@@ -295,6 +331,26 @@ func (az *Cloud) setUpEndpointSlicesInformer(informerFactory informers.SharedInf
 			AddFunc: func(obj interface{}) {
 				es := obj.(*discovery_v1.EndpointSlice)
 				az.endpointSlicesCache.Store(strings.ToLower(fmt.Sprintf("%s/%s", es.Namespace, es.Name)), es)
+
+				if az.LoadBalancerBackendPoolConfigurationType != consts.LoadBalancerBackendPoolConfigurationTypePodIP {
+					klog.V(4).Infof("Backend Pool configuration is %s, skipping backend pool creation", az.LoadBalancerBackendPoolConfigurationType)
+					return
+				}
+
+				svcName := getServiceNameOfEndpointSlice(es)
+				if svcName == "" {
+					klog.V(4).Infof("EndpointSlice %s/%s does not have service name label, skip creating load balancer backend pool", es.Namespace, es.Name)
+					return
+				}
+
+				key := strings.ToLower(fmt.Sprintf("%s/%s", es.Namespace, svcName))
+				si, found := az.getLocalServiceInfo(key)
+				if !found {
+					klog.V(4).Infof("EndpointSlice %s/%s belongs to service %s, but the service is not a local service, or has not finished the initial reconciliation loop. Skip updating load balancer backend pool", es.Namespace, es.Name, key)
+					return
+				}
+
+				az.createOrUpdateBackendPoolForES(es, si)
 			},
 			UpdateFunc: func(oldObj, newObj interface{}) {
 				previousES := oldObj.(*discovery_v1.EndpointSlice)
@@ -315,8 +371,13 @@ func (az *Cloud) setUpEndpointSlicesInformer(informerFactory informers.SharedInf
 					klog.V(4).Infof("EndpointSlice %s/%s belongs to service %s, but the service is not a local service, or has not finished the initial reconciliation loop. Skip updating load balancer backend pool", newES.Namespace, newES.Name, key)
 					return
 				}
-				// lbName, ipFamily := si.lbName, si.ipFamily
-				ipFamily := si.ipFamily
+
+				if az.LoadBalancerBackendPoolConfigurationType == consts.LoadBalancerBackendPoolConfigurationTypePodIP {
+					az.createOrUpdateBackendPoolForES(newES, si)
+					return
+				}
+
+				lbName, ipFamily := si.lbName, si.ipFamily
 				var previousIPs, currentIPs, previousNodeNames, currentNodeNames []string
 				if previousES != nil {
 					for _, ep := range previousES.Endpoints {
@@ -353,13 +414,37 @@ func (az *Cloud) setUpEndpointSlicesInformer(informerFactory informers.SharedInf
 					for _, bpName := range bpNames {
 						currentIPsInBackendPools[bpName] = previousIPs
 					}
-					//TODO (anujbansal): Uncomment this
-					// az.applyIPChangesAmongLocalServiceBackendPoolsByIPFamily(lbName, key, currentIPsInBackendPools, currentIPs)
+
+					az.applyIPChangesAmongLocalServiceBackendPoolsByIPFamily(lbName, key, currentIPsInBackendPools, currentIPs)
 				}
 			},
 			DeleteFunc: func(obj interface{}) {
 				es := obj.(*discovery_v1.EndpointSlice)
 				az.endpointSlicesCache.Delete(strings.ToLower(fmt.Sprintf("%s/%s", es.Namespace, es.Name)))
+
+				if az.LoadBalancerBackendPoolConfigurationType != consts.LoadBalancerBackendPoolConfigurationTypePodIP {
+					klog.V(4).Infof("Backend Pool configuration is %s, skipping backend pool deletion", az.LoadBalancerBackendPoolConfigurationType)
+					return
+				}
+
+				svcName := getServiceNameOfEndpointSlice(es)
+				if svcName == "" {
+					klog.V(4).Infof("EndpointSlice %s/%s does not have service name label, skip deleting load balancer backend pool", es.Namespace, es.Name)
+					return
+				}
+
+				key := strings.ToLower(fmt.Sprintf("%s/%s", es.Namespace, svcName))
+				si, found := az.getLocalServiceInfo(key)
+				if !found {
+					klog.V(4).Infof("EndpointSlice %s/%s belongs to service %s, but the service is not a local service, or has not finished the initial reconciliation loop. Skip updating load balancer backend pool", es.Namespace, es.Name, key)
+					return
+				}
+
+				isIPv6 := es.AddressType == discovery_v1.AddressTypeIPv6
+				poolName := az.getBackendPoolNameForEndpointSlice(es, isIPv6)
+
+				klog.V(4).Infof("Deleting backend pool - %s", poolName)
+				az.LoadBalancerClient.DeleteLBBackendPool(context.Background(), az.ResourceGroup, si.lbName, poolName)
 			},
 		})
 }
@@ -478,10 +563,10 @@ func (az *Cloud) getBackendPoolNameForEndpointSlice(endpointSlice *discovery_v1.
 	if isIPv6 {
 		return fmt.Sprintf("%s-%s", endpointSlice.GetUID(), consts.IPVersionIPv6StringLower)
 	}
-	return fmt.Sprintf("%s", endpointSlice.GetUID())
+	return string(endpointSlice.GetUID())
 }
 
-func (az *Cloud) getBackendPoolNamesForEndpointSliceList(service *v1.Service, endpointSliceList []*discovery_v1.EndpointSlice, isIPv6 bool) *utilsets.IgnoreCaseSet {
+func (az *Cloud) getBackendPoolNamesForEndpointSliceList(endpointSliceList []*discovery_v1.EndpointSlice, isIPv6 bool) *utilsets.IgnoreCaseSet {
 	backendPoolNames := utilsets.NewString()
 
 	for _, endpointSlice := range endpointSliceList {
@@ -496,7 +581,7 @@ func (az *Cloud) getBackendPoolNamesForEndpointSliceList(service *v1.Service, en
 	return backendPoolNames
 }
 
-func (az *Cloud) getPodBackendPoolIDForEndpointSlice(service *v1.Service, endpointSlice *discovery_v1.EndpointSlice, lbName string, ipv6 bool) string {
+func (az *Cloud) getPodBackendPoolIDForEndpointSlice(endpointSlice *discovery_v1.EndpointSlice, lbName string, ipv6 bool) string {
 	return az.getBackendPoolID(lbName, az.getBackendPoolNameForEndpointSlice(endpointSlice, ipv6))
 }
 
@@ -513,9 +598,9 @@ func (az *Cloud) getPodBackendPoolIDsForService(service *v1.Service, lbName stri
 
 	for _, endpointSlice := range endpointSliceList {
 		if endpointSlice.AddressType == discovery_v1.AddressTypeIPv6 {
-			ipv6 = append(ipv6, az.getPodBackendPoolIDForEndpointSlice(service, endpointSlice, lbName, true))
+			ipv6 = append(ipv6, az.getPodBackendPoolIDForEndpointSlice(endpointSlice, lbName, true))
 		} else {
-			ipv4 = append(ipv4, az.getPodBackendPoolIDForEndpointSlice(service, endpointSlice, lbName, false))
+			ipv4 = append(ipv4, az.getPodBackendPoolIDForEndpointSlice(endpointSlice, lbName, false))
 		}
 	}
 	return map[bool][]string{

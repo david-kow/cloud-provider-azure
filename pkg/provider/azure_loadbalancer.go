@@ -173,16 +173,17 @@ func (az *Cloud) reconcileService(_ context.Context, clusterName string, service
 
 	lbName := strings.ToLower(pointer.StringDeref(lb.Name, ""))
 	key := strings.ToLower(serviceName)
-	if az.useMultipleStandardLoadBalancers() && isLocalService(service) {
+	if isLocalService(service) && (az.useMultipleStandardLoadBalancers() || az.LoadBalancerBackendPoolConfigurationType == consts.LoadBalancerBackendPoolConfigurationTypePodIP) {
 		az.localServiceNameToServiceInfoMap.Store(key, newServiceInfo(getServiceIPFamily(service), lbName))
 		// There are chances that the endpointslice changes after EnsureHostsInPool, so
 		// need to check endpointslice for a second time.
 
-		//TODO: (anujbansal) Uncomment
-		// if err := az.checkAndApplyLocalServiceBackendPoolUpdates(*lb, service); err != nil {
-		// 	klog.Errorf("failed to checkAndApplyLocalServiceBackendPoolUpdates: %v", err)
-		// 	return nil, err
-		// }
+		if az.LoadBalancerBackendPoolConfigurationType != consts.LoadBalancerBackendPoolConfigurationTypePodIP {
+			if err := az.checkAndApplyLocalServiceBackendPoolUpdates(*lb, service); err != nil {
+				klog.Errorf("failed to checkAndApplyLocalServiceBackendPoolUpdates: %v", err)
+				return nil, err
+			}
+		}
 	} else {
 		az.localServiceNameToServiceInfoMap.Delete(key)
 	}
