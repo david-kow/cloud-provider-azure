@@ -186,3 +186,10 @@ func GetTestCloudWithExtendedLocation(ctrl *gomock.Controller) (az *Cloud) {
 	az.ExtendedLocationType = "EdgeZone"
 	return az
 }
+
+// GetTestCloudWithContainerLoadBalancer returns a fake azure cloud for unit tests in Azure supporting container load balancer.
+func GetTestCloudWithContainerLoadBalancer(ctrl *gomock.Controller) (az *Cloud) {
+	az = GetTestCloud(ctrl)
+	az.LoadBalancerBackendPoolConfigurationType = consts.LoadBalancerBackendPoolConfigurationTypePodIP
+	return az
+}
