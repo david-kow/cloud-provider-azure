@@ -37,6 +37,16 @@ import (
 	utilsets "sigs.k8s.io/cloud-provider-azure/pkg/util/sets"
 )
 
+func TestSetUpPodInformerHonorsCancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	tracker := &DiffTracker{kubeClient: fake.NewSimpleClientset()}
+
+	err := tracker.SetUpPodInformer(ctx)
+
+	assert.ErrorIs(t, err, context.Canceled)
+}
+
 // TestPodInformerAddPod tests the podInformerAddPod function
 func TestPodInformerAddPod(t *testing.T) {
 	now := metav1.Now()

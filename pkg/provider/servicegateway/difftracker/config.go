@@ -25,6 +25,9 @@ type Config struct {
 	// Azure subscription ID
 	SubscriptionID string
 
+	// Subscription that hosts network resources. Defaults to SubscriptionID.
+	NetworkResourceSubscriptionID string
+
 	// Azure resource group name
 	ResourceGroup string
 
@@ -34,6 +37,9 @@ type Config struct {
 
 	// Service Gateway resource name
 	ServiceGatewayResourceName string
+
+	// Full Service Gateway resource ID. When empty, ServiceGatewayResourceID derives it.
+	ServiceGatewayID string
 
 	// Virtual Network name (required for backend pool configuration)
 	VNetName string
@@ -52,6 +58,13 @@ func (c *Config) VNetResourceGroupOrDefault() string {
 		return c.VNetResourceGroup
 	}
 	return c.ResourceGroup
+}
+
+func (c *Config) networkResourceSubscriptionID() string {
+	if c.NetworkResourceSubscriptionID != "" {
+		return c.NetworkResourceSubscriptionID
+	}
+	return c.SubscriptionID
 }
 
 // Validate checks if the configuration has all required fields
@@ -76,9 +89,12 @@ func (c *Config) Validate() error {
 
 // ServiceGatewayResourceID returns the ARM resource ID of the configured Service Gateway.
 func (c *Config) ServiceGatewayResourceID() string {
+	if c.ServiceGatewayID != "" {
+		return c.ServiceGatewayID
+	}
 	return fmt.Sprintf(
 		"/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/serviceGateways/%s",
-		c.SubscriptionID,
+		c.networkResourceSubscriptionID(),
 		c.ResourceGroup,
 		c.ServiceGatewayResourceName,
 	)

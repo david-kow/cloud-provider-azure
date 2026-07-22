@@ -65,9 +65,15 @@ func newSGWCloudWithServiceAndRecorder(t *testing.T, ctrl *gomock.Controller, sv
 	az := GetTestCloudWithContainerLoadBalancer(ctrl)
 	kubeClient := fake.NewSimpleClientset(&svc)
 	az.KubeClient = kubeClient
-	az.diffTracker = newProviderDiffTracker(t, az, kubeClient)
+	tracker := newProviderDiffTracker(t, az, kubeClient)
+	loadBalancer, supported := az.serviceGatewayRuntime.LoadBalancer()
+	assert.True(t, supported)
+	serviceGatewayLoadBalancer, ok := loadBalancer.(*difftracker.LoadBalancer)
+	assert.True(t, ok)
+	assert.NoError(t, serviceGatewayLoadBalancer.SetTracker(tracker))
 	rec := record.NewFakeRecorder(10)
 	az.eventRecorder = rec
+	tracker.SetEventRecorder(rec)
 
 	return az, rec
 }

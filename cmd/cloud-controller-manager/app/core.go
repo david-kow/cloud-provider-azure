@@ -27,6 +27,7 @@ import (
 	"strings"
 
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	"k8s.io/client-go/informers"
 	cloudprovider "k8s.io/cloud-provider"
 	nodecontroller "k8s.io/cloud-provider/controllers/node"
 	nodelifecyclecontroller "k8s.io/cloud-provider/controllers/nodelifecycle"
@@ -42,7 +43,14 @@ import (
 	nodeipamcontroller "sigs.k8s.io/cloud-provider-azure/pkg/nodeipam"
 	nodeipamconfig "sigs.k8s.io/cloud-provider-azure/pkg/nodeipam/config"
 	"sigs.k8s.io/cloud-provider-azure/pkg/nodeipam/ipam"
+	"sigs.k8s.io/cloud-provider-azure/pkg/provider/servicegateway"
 )
+
+type serviceGatewayRuntimeProvider interface {
+	ServiceGatewayRuntime() *servicegateway.Runtime
+}
+
+type serviceGatewayRuntimeStarter func(context.Context, *servicegateway.Runtime, informers.SharedInformerFactory) error
 
 func startCloudNodeController(ctx context.Context, controllerContext genericcontrollermanager.ControllerContext, completedConfig *cloudcontrollerconfig.CompletedConfig, cloud cloudprovider.Interface) (http.Handler, bool, error) {
 	// Start the CloudNodeController
@@ -85,10 +93,21 @@ func startCloudNodeLifecycleController(ctx context.Context, controllerContext ge
 }
 
 func startServiceController(ctx context.Context, controllerContext genericcontrollermanager.ControllerContext, completedConfig *cloudcontrollerconfig.CompletedConfig, cloud cloudprovider.Interface) (http.Handler, bool, error) {
+	return startServiceControllerWithRuntimeStarter(ctx, controllerContext, completedConfig, cloud, func(ctx context.Context, runtime *servicegateway.Runtime, informerFactory informers.SharedInformerFactory) error {
+		return runtime.Start(ctx, informerFactory)
+	})
+}
+
+func startServiceControllerWithRuntimeStarter(ctx context.Context, controllerContext genericcontrollermanager.ControllerContext, completedConfig *cloudcontrollerconfig.CompletedConfig, cloud cloudprovider.Interface, startRuntime serviceGatewayRuntimeStarter) (http.Handler, bool, error) {
 	logger := log.FromContextOrBackground(ctx).WithName("startServiceController")
+	serviceCloud, err := serviceControllerCloud(ctx, completedConfig.SharedInformers, cloud, startRuntime)
+	if err != nil {
+		return nil, false, err
+	}
+
 	// Start the service controller
 	serviceController, err := servicecontroller.New(
-		cloud,
+		serviceCloud,
 		completedConfig.ClientBuilder.ClientOrDie("service-controller"),
 		completedConfig.SharedInformers.Core().V1().Services(),
 		completedConfig.SharedInformers.Core().V1().Nodes(),
@@ -104,6 +123,23 @@ func startServiceController(ctx context.Context, controllerContext genericcontro
 	go serviceController.Run(ctx, int(completedConfig.ComponentConfig.ServiceController.ConcurrentServiceSyncs), controllerContext.ControllerManagerMetrics)
 
 	return nil, true, nil
+}
+
+func serviceControllerCloud(ctx context.Context, informerFactory informers.SharedInformerFactory, cloud cloudprovider.Interface, startRuntime serviceGatewayRuntimeStarter) (cloudprovider.Interface, error) {
+	if runtimeProvider, ok := cloud.(serviceGatewayRuntimeProvider); ok {
+		runtime := runtimeProvider.ServiceGatewayRuntime()
+		if runtime != nil && runtime.Enabled() {
+			if err := startRuntime(ctx, runtime, informerFactory); err != nil {
+				return nil, fmt.Errorf("failed to start ServiceGateway runtime: %w", err)
+			}
+			loadBalancer, supported := runtime.LoadBalancer()
+			if !supported || loadBalancer == nil {
+				return nil, fmt.Errorf("ServiceGateway LoadBalancer is enabled but not configured")
+			}
+			return servicegateway.NewLoadBalancerCloud(loadBalancer), nil
+		}
+	}
+	return cloud, nil
 }
 
 func startRouteController(ctx context.Context, controllerContext genericcontrollermanager.ControllerContext, completedConfig *cloudcontrollerconfig.CompletedConfig, cloud cloudprovider.Interface) (http.Handler, bool, error) {

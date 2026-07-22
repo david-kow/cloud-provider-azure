@@ -30,7 +30,6 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
@@ -47,10 +46,10 @@ func ResyncPeriod(base time.Duration) func() time.Duration {
 	}
 }
 
-// setUpPodInformerForEgress creates an informer for Pods with egress labels.
+// SetUpPodInformer creates an informer for Pods with egress labels.
 // It uses label selectors to filter pods efficiently at the API server level,
 // reducing memory and CPU overhead by only watching relevant pods.
-func (dt *DiffTracker) SetUpPodInformer() {
+func (dt *DiffTracker) SetUpPodInformer(ctx context.Context) error {
 	klog.V(2).Infof("setUpPodInformerForEgress: Setting up pod informer with label selector: %s", consts.PodLabelServiceEgressGateway)
 
 	// Create a separate informer factory with label selector to filter pods at the API server
@@ -101,15 +100,17 @@ func (dt *DiffTracker) SetUpPodInformer() {
 			},
 		})
 	if err != nil {
-		klog.Errorf("setUpPodInformerForEgress: Failed to add event handlers to pod informer: %v", err)
-		return
+		return fmt.Errorf("add egress Pod informer handlers: %w", err)
 	}
 
 	// Start the informer factory
 	klog.V(2).Infof("setUpPodInformerForEgress: Starting pod informer factory")
-	podInformerFactory.Start(wait.NeverStop)
-	podInformerFactory.WaitForCacheSync(wait.NeverStop)
+	podInformerFactory.Start(ctx.Done())
+	if result := podInformerFactory.WaitForCacheSyncWithContext(ctx); result.Err != nil {
+		return fmt.Errorf("sync egress Pod informer cache: %w", result.Err)
+	}
 	klog.V(2).Infof("setUpPodInformerForEgress: Pod informer successfully initialized and synced")
+	return nil
 }
 
 // reconcileEgressPodUpdate applies an egress pod UPDATE. A live re-registration (needsRemove AND

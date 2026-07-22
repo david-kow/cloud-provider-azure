@@ -17,12 +17,52 @@ limitations under the License.
 package app
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"k8s.io/client-go/informers"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/rest"
+	cloudprovider "k8s.io/cloud-provider"
+	controllermetrics "k8s.io/component-base/metrics/prometheus/controllers"
+	genericcontrollermanager "k8s.io/controller-manager/app"
 
+	cloudcontrollerconfig "sigs.k8s.io/cloud-provider-azure/cmd/cloud-controller-manager/app/config"
 	nodeipamconfig "sigs.k8s.io/cloud-provider-azure/pkg/nodeipam/config"
+	providerconfig "sigs.k8s.io/cloud-provider-azure/pkg/provider/config"
+	"sigs.k8s.io/cloud-provider-azure/pkg/provider/servicegateway"
 )
+
+type fakeServiceGatewayRuntimeProvider struct {
+	cloudprovider.Interface
+	runtime                     *servicegateway.Runtime
+	started                     bool
+	legacyLoadBalancerRequested bool
+}
+
+func (f *fakeServiceGatewayRuntimeProvider) ServiceGatewayRuntime() *servicegateway.Runtime {
+	return f.runtime
+}
+
+func (f *fakeServiceGatewayRuntimeProvider) LoadBalancer() (cloudprovider.LoadBalancer, bool) {
+	f.legacyLoadBalancerRequested = true
+	if f.runtime == nil {
+		return nil, false
+	}
+	return f.runtime.LoadBalancer()
+}
+
+type staticControllerClientBuilder struct {
+	cloudprovider.ControllerClientBuilder
+	client kubernetes.Interface
+}
+
+func (b staticControllerClientBuilder) ClientOrDie(string) kubernetes.Interface {
+	return b.client
+}
 
 func TestSetNodeCIDRMaskSizesDualStack(t *testing.T) {
 	for _, testCase := range []struct {
@@ -65,4 +105,115 @@ func TestSetNodeCIDRMaskSizesDualStack(t *testing.T) {
 			assert.Equal(t, testCase.expectedIPV6Mask, ipv6Mask)
 		})
 	}
+}
+
+func TestValidateServiceGatewayControllerConfiguration(t *testing.T) {
+	tests := []struct {
+		name        string
+		cloud       any
+		controllers []string
+		wantErr     string
+	}{
+		{
+			name:        "non ServiceGateway provider",
+			cloud:       struct{}{},
+			controllers: []string{"*"},
+		},
+		{
+			name:        "ServiceGateway disabled",
+			cloud:       &fakeServiceGatewayRuntimeProvider{runtime: servicegateway.NewRuntime(providerconfig.Config{}, nil, nil)},
+			controllers: []string{"-service-lb-controller"},
+		},
+		{
+			name:        "service controller enabled",
+			cloud:       &fakeServiceGatewayRuntimeProvider{runtime: servicegateway.NewRuntime(providerconfig.Config{ServiceGatewayEnabled: true}, nil, nil)},
+			controllers: []string{"*"},
+		},
+		{
+			name:        "service controller disabled",
+			cloud:       &fakeServiceGatewayRuntimeProvider{runtime: servicegateway.NewRuntime(providerconfig.Config{ServiceGatewayEnabled: true}, nil, nil)},
+			controllers: []string{"-service-lb-controller"},
+			wantErr:     `ServiceGateway requires "service-lb-controller" to be enabled`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateServiceGatewayControllerConfiguration(test.cloud, test.controllers)
+			if test.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			assert.EqualError(t, err, test.wantErr)
+		})
+	}
+}
+
+func TestStartServiceControllerBootstrapsServiceGatewayBeforeLoadBalancerCapture(t *testing.T) {
+	kubeClient := fake.NewSimpleClientset()
+	config := (&cloudcontrollerconfig.Config{
+		LoopbackClientConfig: &rest.Config{},
+		ClientBuilder:        staticControllerClientBuilder{client: kubeClient},
+		SharedInformers:      informers.NewSharedInformerFactory(kubeClient, 0),
+	}).Complete()
+	runtime := servicegateway.NewRuntime(providerconfig.Config{ServiceGatewayEnabled: true}, nil, kubeClient)
+	cloud := &fakeServiceGatewayRuntimeProvider{runtime: runtime}
+	startRuntime := func(context.Context, *servicegateway.Runtime, informers.SharedInformerFactory) error {
+		cloud.started = true
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, started, err := startServiceControllerWithRuntimeStarter(
+		ctx,
+		genericcontrollermanager.ControllerContext{
+			ControllerManagerMetrics: controllermetrics.NewControllerManagerMetrics("test"),
+		},
+		config,
+		cloud,
+		startRuntime,
+	)
+
+	assert.NoError(t, err)
+	assert.True(t, started)
+	assert.True(t, cloud.started)
+	assert.False(t, cloud.legacyLoadBalancerRequested)
+}
+
+func TestServiceControllerCloudPreservesLegacyCloudWhenRuntimeDisabled(t *testing.T) {
+	cloud := &fakeServiceGatewayRuntimeProvider{
+		runtime: servicegateway.NewRuntime(providerconfig.Config{}, nil, nil),
+	}
+
+	selected, err := serviceControllerCloud(
+		context.Background(),
+		nil,
+		cloud,
+		func(context.Context, *servicegateway.Runtime, informers.SharedInformerFactory) error {
+			t.Fatal("disabled ServiceGateway runtime must not start")
+			return nil
+		},
+	)
+
+	assert.NoError(t, err)
+	assert.Same(t, cloud, selected)
+}
+
+func TestServiceControllerCloudReturnsRuntimeStartError(t *testing.T) {
+	cloud := &fakeServiceGatewayRuntimeProvider{
+		runtime: servicegateway.NewRuntime(providerconfig.Config{ServiceGatewayEnabled: true}, nil, nil),
+	}
+
+	selected, err := serviceControllerCloud(
+		context.Background(),
+		nil,
+		cloud,
+		func(context.Context, *servicegateway.Runtime, informers.SharedInformerFactory) error {
+			return errors.New("start failed")
+		},
+	)
+
+	assert.Nil(t, selected)
+	assert.EqualError(t, err, "failed to start ServiceGateway runtime: start failed")
 }

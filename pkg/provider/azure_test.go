@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -52,9 +51,11 @@ import (
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/interfaceclient/mock_interfaceclient"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/loadbalancerclient/mock_loadbalancerclient"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/mock_azclient"
+	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/natgatewayclient/mock_natgatewayclient"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/providerclient/mock_providerclient"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/publicipaddressclient/mock_publicipaddressclient"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/securitygroupclient/mock_securitygroupclient"
+	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/servicegatewayclient/mock_servicegatewayclient"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/virtualmachineclient/mock_virtualmachineclient"
 	"sigs.k8s.io/cloud-provider-azure/pkg/consts"
 	providerconfig "sigs.k8s.io/cloud-provider-azure/pkg/provider/config"
@@ -1662,7 +1663,7 @@ func TestNewCloudInitializesKubeClientAtRequiredStage(t *testing.T) {
 		_, err := NewCloud(context.Background(), builder, config, true)
 
 		assert.ErrorContains(t, err, "mutually exclusive")
-		assert.Equal(t, 1, builder.calls)
+		assert.Zero(t, builder.calls)
 	})
 
 	t.Run("invalid non-ServiceGateway CCM", func(t *testing.T) {
@@ -1686,6 +1687,7 @@ func TestNewCloudInitializesKubeClientAtRequiredStage(t *testing.T) {
 			return
 		}
 		assert.Same(t, kubeClient, cloud.(*Cloud).KubeClient)
+		assert.Nil(t, cloud.(*Cloud).ServiceGatewayRuntime())
 		assert.Equal(t, 1, builder.calls)
 	})
 
@@ -1700,10 +1702,13 @@ func TestNewCloudInitializesKubeClientAtRequiredStage(t *testing.T) {
 		assert.Zero(t, builder.calls)
 	})
 
-	t.Run("ServiceGateway CCM requires builder", func(t *testing.T) {
-		_, err := NewCloud(context.Background(), nil, serviceGatewayConfig(), true)
+	t.Run("ServiceGateway CCM defers builder requirement", func(t *testing.T) {
+		config := serviceGatewayConfig()
+		config.MultipleStandardLoadBalancerConfigurations = []providerconfig.MultipleStandardLoadBalancerConfiguration{{}}
 
-		assert.EqualError(t, err, "NewCloud: ServiceGateway requires a clientBuilder")
+		_, err := NewCloud(context.Background(), nil, config, true)
+
+		assert.ErrorContains(t, err, "mutually exclusive")
 	})
 }
 
@@ -2454,16 +2459,40 @@ func TestInitializePublishesServiceGatewayDependencies(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	az := GetTestCloudWithContainerLoadBalancer(ctrl)
 	kubeClient := az.KubeClient
-	az.diffTracker.SetEventRecorder(nil)
 
 	az.Initialize(nil, nil)
 	t.Cleanup(az.eventBroadcaster.Shutdown)
 
-	assert.Same(t, kubeClient, az.KubeClient, "Initialize must preserve the client retained by the difftracker")
+	assert.Same(t, kubeClient, az.KubeClient)
+	assert.NotNil(t, az.eventRecorder)
 
-	recorder := reflect.ValueOf(az.diffTracker).Elem().FieldByName("eventRecorder")
-	assert.True(t, recorder.IsValid(), "difftracker must retain its event recorder dependency")
-	assert.False(t, recorder.IsNil(), "Initialize must publish the event recorder to the difftracker")
+	runtime := az.ServiceGatewayRuntime()
+	assert.NotNil(t, runtime)
+	loadBalancer, supported := runtime.LoadBalancer()
+	assert.True(t, supported)
+	service := getTestService("servicegateway-lifecycle", v1.ProtocolTCP, nil, false, 80)
+	assert.EqualError(t, loadBalancer.UpdateLoadBalancer(context.Background(), testClusterName, &service, nil), "ServiceGateway LoadBalancer is not initialized")
+
+	networkClientFactory := az.NetworkClientFactory.(*mock_azclient.MockClientFactory)
+	loadBalancerClient := networkClientFactory.GetLoadBalancerClient().(*mock_loadbalancerclient.MockInterface)
+	publicIPClient := networkClientFactory.GetPublicIPAddressClient().(*mock_publicipaddressclient.MockInterface)
+	natGatewayClient := mock_natgatewayclient.NewMockInterface(ctrl)
+	serviceGatewayClient := mock_servicegatewayclient.NewMockInterface(ctrl)
+	networkClientFactory.EXPECT().GetNatGatewayClient().Return(natGatewayClient).AnyTimes()
+	networkClientFactory.EXPECT().GetServiceGatewayClient().Return(serviceGatewayClient).AnyTimes()
+
+	serviceGatewayClient.EXPECT().GetServices(gomock.Any(), az.ResourceGroup, consts.DefaultServiceGatewayResourceName).Return(nil, nil).AnyTimes()
+	serviceGatewayClient.EXPECT().GetAddressLocations(gomock.Any(), az.ResourceGroup, consts.DefaultServiceGatewayResourceName).Return(nil, nil).AnyTimes()
+	loadBalancerClient.EXPECT().List(gomock.Any(), az.ResourceGroup).Return(nil, nil).AnyTimes()
+	natGatewayClient.EXPECT().List(gomock.Any(), az.ResourceGroup).Return(nil, nil).AnyTimes()
+	publicIPClient.EXPECT().List(gomock.Any(), az.ResourceGroup).Return(nil, nil).AnyTimes()
+
+	informerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	assert.NoError(t, runtime.Start(ctx, informerFactory))
+
+	assert.NoError(t, loadBalancer.UpdateLoadBalancer(context.Background(), testClusterName, &service, nil))
 }
 
 func TestInitializeCloudFromConfig(t *testing.T) {
